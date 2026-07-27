@@ -1,0 +1,92 @@
+# snapshield
+
+[![npm version](https://img.shields.io/npm/v/snapshield.svg)](https://www.npmjs.com/package/snapshield)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D16-brightgreen.svg)](https://nodejs.org)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-orange.svg)](./README.md)
+
+A safety net for AI coding agents. Wrap `claude`, `codex`, `cursor-agent`, or
+anything else you point at your repo, and get an instant undo if it breaks
+something — even if it ran `git reset --hard`, deleted files, or nuked your
+working tree.
+
+## Why
+
+Coding agents occasionally do genuinely destructive things: hard resets,
+force pushes, deleted files, mangled merges. This is a tiny, dependency-free
+CLI that snapshots your **entire** working tree (tracked, staged, and
+untracked-but-not-gitignored files) into hidden commit objects before the
+agent runs — so "undo" is always one command away, no matter what the agent
+did.
+
+It never touches your real branch, index, or working tree until you
+explicitly `restore` — snapshots live in a separate ref namespace
+(`refs/snapshield/*`) so they're invisible to normal git commands and safe
+from garbage collection.
+
+## Install
+
+```bash
+cd snapshield
+npm link      # makes the `snapshield` command available globally
+# or: npm install -g .
+```
+
+(No install step required to just try it — you can always run
+`node /path/to/snapshield/bin/snapshield.js ...` directly.)
+
+## Quick start
+
+```bash
+cd your-project        # must be a git repo with at least one commit
+snapshield init
+
+# Wrap an agent session — this is the main event:
+snapshield run -- claude
+snapshield run -- codex
+snapshield run -- cursor-agent
+
+# Didn't like what it did?
+snapshield undo
+```
+
+## All commands
+
+| Command | What it does |
+|---|---|
+| `snapshield init` | One-time setup check in the current repo |
+| `snapshield snapshot ["msg"]` | Take a manual checkpoint right now |
+| `snapshield list [-n N]` | Show recent snapshots |
+| `snapshield diff <id>` | Show what's changed since snapshot `<id>` |
+| `snapshield restore <id> [--clean]` | Roll back to snapshot `<id>` (auto-backs-up current state first; `--clean` also removes untracked files added since) |
+| `snapshield undo` | Shortcut: roll back to the checkpoint before the most recent one |
+| `snapshield run -- <cmd...>` | Snapshot, run `<cmd>`, snapshot again, print a diffstat + undo hint |
+| `snapshield watch [--interval SEC]` | Auto-snapshot every SEC seconds (default 120) until Ctrl+C — run in a spare terminal tab during a long agent session |
+
+## How it works (the short version)
+
+Each snapshot is a real git commit object built from a throwaway index (via
+`GIT_INDEX_FILE`), so it captures tracked + staged + untracked files without
+touching your actual working tree or index. It's parented to your current
+`HEAD` and pinned with a ref under `refs/snapshield/snap-N` so git won't
+garbage collect it. `restore` always takes a fresh "just in case" snapshot
+of whatever state you're in *before* rolling back, so restoring is itself
+undoable.
+
+## Known limitations (read before you trust it blindly)
+
+- **Local-machine only.** Snapshots live in your local `.git` directory and
+  are not pushed anywhere. If your only copy of the repo is destroyed
+  (disk failure, `rm -rf` on the whole project including `.git`), snapshield
+  can't help — it protects against bad *commands*, not bad *disks*.
+- Requires the repo to already have at least one commit.
+- `restore` without `--clean` won't remove files the agent created *after*
+  the snapshot; it tells you what those are so you can decide.
+- This is a fast prototype, not a security boundary — it hasn't been
+  audited or used in production. Try it on low-stakes repos first.
+
+## Roadmap ideas (not built yet)
+
+- A `pre-run` hook mode that wraps common agent CLIs automatically
+- Optional push of snapshot refs to a remote for off-machine safety
+- A `prune`/`gc` command for manual cleanup beyond the automatic 200-snapshot cap
