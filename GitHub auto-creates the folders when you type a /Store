@@ -1,0 +1,61 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const git = require('./git');
+
+function storeDir() {
+  const dir = path.join(git.gitDir(), 'snapshield');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function logPath() {
+  return path.join(storeDir(), 'snapshots.jsonl');
+}
+
+function loadAll() {
+  const file = logPath();
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function nextId(entries) {
+  return entries.length ? entries[entries.length - 1].id + 1 : 1;
+}
+
+function append(entry) {
+  fs.appendFileSync(logPath(), JSON.stringify(entry) + '\n');
+}
+
+function findById(id) {
+  const entries = loadAll();
+  return entries.find((e) => e.id === Number(id));
+}
+
+function latest(filterFn) {
+  const entries = loadAll();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (!filterFn || filterFn(entries[i])) return entries[i];
+  }
+  return null;
+}
+
+// Keeps the store from growing forever: once past `maxAuto` auto-generated
+// snapshots, prunes the oldest auto ones (and their pinning refs). Manual /
+// pre-restore-backup snapshots are never auto-pruned.
+function pruneAutoSnapshots(maxAuto = 200) {
+  const entries = loadAll();
+  const autoOnes = entries.filter((e) => e.kind === 'auto');
+  if (autoOnes.length <= maxAuto) return;
+  const toDrop = autoOnes.slice(0, autoOnes.length - maxAuto);
+  const dropIds = new Set(toDrop.map((e) => e.id));
+  for (const e of toDrop) git.deleteRef(e.ref);
+  const kept = entries.filter((e) => !dropIds.has(e.id));
+  fs.writeFileSync(logPath(), kept.map((e) => JSON.stringify(e)).join('\n') + '\n');
+}
+
+module.exports = { storeDir, logPath, loadAll, nextId, append, findById, latest, pruneAutoSnapshots };
