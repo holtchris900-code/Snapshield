@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# End-to-end smoke test for snapshield. Simulates an AI coding agent going
+# rogue (hard-resetting tracked changes + deleting an untracked file) and
+# verifies that `snapshield restore` and `snapshield undo` fully recover the
+# lost work.
+set -euo pipefail
+
+SNAPSHIELD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/snapshield.js"
+WORKDIR="$(mktemp -d)"
+cleanup() { rm -rf "$WORKDIR"; }
+trap cleanup EXIT
+
+pass() { echo "PASS: $1"; }
+fail() { echo "FAIL: $1"; exit 1; }
+
+cd "$WORKDIR"
+git init -q
+git config user.email "test@example.com"
+git config user.name "Test User"
+echo "hello v1" > a.txt
+git add a.txt
+git commit -q -m "init"
+node "$SNAPSHIELD_BIN" init > /dev/null
+
+# --- Scenario 1: manual snapshot + restore after simulated disaster ---
+echo "safe important work" > important.txt
+echo "good progress" > a.txt
+node "$SNAPSHIELD_BIN" snapshot "checkpoint before agent" > /dev/null
+
+git reset --hard -q
+rm -f important.txt
+
+node "$SNAPSHIELD_BIN" restore 1 > /dev/null
+
+[ "$(cat a.txt)" = "good progress" ] || fail "restore did not recover a.txt"
+[ -f important.txt ] && [ "$(cat important.txt)" = "safe important work" ] || fail "restore did not recover important.txt"
+pass "restore recovers tracked edits and deleted untracked files"
+
+# --- Scenario 2: snapshield run wraps a destructive command, undo reverts it ---
+node "$SNAPSHIELD_BIN" run -- bash -c 'echo "corrupted" > a.txt; rm -f important.txt' > /dev/null
+[ "$(cat a.txt)" = "corrupted" ] || fail "test setup: destructive command did not run as expected"
+
+node "$SNAPSHIELD_BIN" undo > /dev/null
+
+[ "$(cat a.txt)" = "good progress" ] || fail "undo did not recover a.txt after snapshield run"
+[ -f important.txt ] && [ "$(cat important.txt)" = "safe important work" ] || fail "undo did not recover important.txt after snapshield run"
+pass "snapshield run + undo fully reverts a destructive wrapped command"
+
+# --- Scenario 3: restore --clean removes untracked cruft left after the snapshot ---
+echo "junk" > junk.txt
+node "$SNAPSHIELD_BIN" restore 2 --clean > /dev/null
+[ ! -f junk.txt ] || fail "restore --clean did not remove post-snapshot untracked file"
+pass "restore --clean removes untracked files added after the snapshot"
+
+echo ""
+echo "All snapshield smoke tests passed."
