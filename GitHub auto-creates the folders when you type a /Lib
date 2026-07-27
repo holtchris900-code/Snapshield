@@ -1,0 +1,123 @@
+'use strict';
+const { execFileSync, spawnSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function run(args, opts = {}) {
+  const out = execFileSync('git', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    ...opts,
+  });
+  return typeof out === 'string' ? out.trim() : out;
+}
+
+function tryRun(args, opts = {}) {
+  try {
+    return run(args, opts);
+  } catch (e) {
+    return null;
+  }
+}
+
+function assertInsideRepo() {
+  const inside = tryRun(['rev-parse', '--is-inside-work-tree']);
+  if (inside !== 'true') {
+    console.error('snapshield: not inside a git repository. Run `git init` first.');
+    process.exit(1);
+  }
+}
+
+function gitDir() {
+  return run(['rev-parse', '--git-dir']);
+}
+
+function headSha() {
+  const sha = tryRun(['rev-parse', 'HEAD']);
+  if (!sha) {
+    console.error(
+      'snapshield: this repo has no commits yet. Run `git commit --allow-empty -m "init"` first, ' +
+        'then try again.'
+    );
+    process.exit(1);
+  }
+  return sha;
+}
+
+function currentBranch() {
+  return tryRun(['rev-parse', '--abbrev-ref', 'HEAD']) || '(detached)';
+}
+
+// Creates a commit object representing the FULL current state of the working
+// tree (tracked + staged + untracked-but-not-ignored files) WITHOUT touching
+// the real index, the working tree, HEAD, or the current branch.
+//
+// Technique: point GIT_INDEX_FILE at a throwaway temp file, seed it from
+// HEAD, `git add -A` into that temp index only, write the resulting tree,
+// and wrap it in a commit object whose parent is the current HEAD.
+function createSnapshotCommit(message) {
+  const parent = headSha();
+  const tmpIndex = path.join(
+    os.tmpdir(),
+    `snapshield-index-${process.pid}-${(process.hrtime.bigint() / 1000n).toString()}`
+  );
+  const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+  try {
+    run(['read-tree', parent], { env });
+    run(['add', '-A'], { env });
+    const tree = run(['write-tree'], { env });
+    const commit = run(['commit-tree', tree, '-p', parent, '-m', message], { env });
+    return { sha: commit, tree, parent };
+  } finally {
+    if (fs.existsSync(tmpIndex)) fs.unlinkSync(tmpIndex);
+  }
+}
+
+function updateRef(ref, sha) {
+  run(['update-ref', ref, sha]);
+}
+
+function deleteRef(ref) {
+  tryRun(['update-ref', '-d', ref]);
+}
+
+// Hard-resets the current branch/HEAD/index/working tree to match `sha`.
+// Untracked files created AFTER the snapshot are left alone unless
+// `clean` is true (in which case `git clean -fd` also runs).
+function hardResetTo(sha, { clean = false } = {}) {
+  run(['reset', '--hard', sha], { stdio: 'inherit' });
+  if (clean) {
+    run(['clean', '-fd'], { stdio: 'inherit' });
+  }
+}
+
+function diffStat(shaA, shaB) {
+  return tryRun(['diff', '--stat', shaA, shaB]) || '(no changes)';
+}
+
+function diffFull(shaA, shaB) {
+  return tryRun(['diff', shaA, shaB]) || '';
+}
+
+function untrackedNewSince(sha) {
+  // Best-effort: list current untracked files (respecting .gitignore).
+  const out = tryRun(['ls-files', '--others', '--exclude-standard']);
+  return out ? out.split('\n').filter(Boolean) : [];
+}
+
+module.exports = {
+  run,
+  tryRun,
+  assertInsideRepo,
+  gitDir,
+  headSha,
+  currentBranch,
+  createSnapshotCommit,
+  updateRef,
+  deleteRef,
+  hardResetTo,
+  diffStat,
+  diffFull,
+  untrackedNewSince,
+};
